@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 import telebot
@@ -6,7 +7,7 @@ import telebot
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
-# TOKEN environmentdan olinadi (Render → Environment → TOKEN)
+# TOKEN берём из переменной окружения (Render → Environment → TOKEN)
 TOKEN = os.getenv("TOKEN")
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
@@ -14,10 +15,7 @@ API_URL = "https://www.imei.kg/api/phys/imei/status?imei={imei}"
 
 
 def fetch_imei_data(imei: str) -> dict:
-    """
-    IMEI bo'yicha API'dan ma'lumot olib keladi.
-    Xato bo'lsa ham dict qaytaradi.
-    """
+    """Запрос к API по IMEI. Всегда возвращает dict."""
     try:
         r = requests.get(API_URL.format(imei=imei), timeout=10)
         return r.json()
@@ -27,15 +25,16 @@ def fetch_imei_data(imei: str) -> dict:
 
 def parse_imei(data: dict) -> dict:
     """
-    API javobini qulay formatga keltiramiz.
-    Qaytadi: {
+    Приводим ответ API к удобному виду.
+
+    Возвращаем:
+    {
       "model": ...,
       "fullname": ...,
       "status_code": "REGISTERED"/"UNREGISTERED"/"UNKNOWN",
-      "status_text": "Зарегистрирован"/...,
+      "status_text": "Зарегистрирован"/...
     }
     """
-    # Agar SUCCESS bo'lmasa, xato deb hisoblaymiz
     if data.get("status") != "SUCCESS":
         return {
             "model": "Неизвестно",
@@ -73,9 +72,7 @@ def parse_imei(data: dict) -> dict:
 
 
 def format_text_answer(imei: str, info: dict) -> str:
-    """
-    Bitta IMEI uchun Telegramga chiqadigan matn.
-    """
+    """Формируем текстовый ответ для одного IMEI."""
     model = info["model"]
     fullname = info["fullname"]
     status_code = info["status_code"]
@@ -101,18 +98,25 @@ def format_text_answer(imei: str, info: dict) -> str:
 
 def create_excel_xlsx(imei_list, info_map) -> str:
     """
-    IMEIlar bo'yicha xlsx fayl yaratadi.
-    Ustunlar: Полное название / IMEI / Статус
-    Ranglar: yashil/qizil/ko'k.
+    Создаём XLSX-файл по списку IMEI.
+
+    Колонки:
+      - Полное название
+      - IMEI
+      - Статус
+
+    Цвета:
+      - зелёный: зарегистрирован
+      - красный: не зарегистрирован
+      - синий: неизвестно / ошибка
     """
     wb = Workbook()
     ws = wb.active
     ws.title = "IMEI Report"
 
-    # Sarlavha
+    # Заголовки
     ws.append(["Полное название", "IMEI", "Статус"])
 
-    # Ranglar
     green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     blue_fill = PatternFill(start_color="C6D9F1", end_color="C6D9F1", fill_type="solid")
@@ -131,7 +135,6 @@ def create_excel_xlsx(imei_list, info_map) -> str:
         row = ws.max_row + 1
         ws.append([fullname, imei, status_text])
 
-        # Rangni statusga qarab beramiz
         if status_code == "REGISTERED":
             fill = green_fill
         elif status_code == "UNREGISTERED":
@@ -139,7 +142,6 @@ def create_excel_xlsx(imei_list, info_map) -> str:
         else:
             fill = blue_fill
 
-        # Faqat status ustuniga rang
         ws[f"C{row}"].fill = fill
 
     file_path = "imei_result.xlsx"
@@ -150,40 +152,44 @@ def create_excel_xlsx(imei_list, info_map) -> str:
 @bot.message_handler(commands=["start"])
 def start_handler(message):
     text = (
-        "Ассалому алейкум!\n\n"
-        "Бу бот IMEIни текшириб беради.\n"
-        "Просто отправьте IMEI (14–15 цифр).\n\n"
-        "📄 Для Excel отправьте:\n"
-        "<code>/excel</code> и далее список IMEI построчно."
+        "Здравствуйте!\n\n"
+        "Этот бот проверяет IMEI по базе imei.kg.\n"
+        "Просто отправьте один или несколько IMEI (каждый на новой строке или через пробел).\n\n"
+        "📄 Чтобы получить Excel (XLSX), отправьте команду:\n"
+        "<code>/excel</code> или <code>/exel</code>, а ниже список IMEI построчно."
     )
     bot.reply_to(message, text)
 
 
-@bot.message_handler(commands=["excel"])
+@bot.message_handler(commands=["excel", "exel"])
 def excel_handler(message):
     """
-    /excel 3540... 3535...
-    yoki:
+    Команда /excel или /exel:
+
     /excel
     3540...
     3535...
+
+    — для этих IMEI бот отправит отдельные ответы + XLSX-файл.
     """
-    # /excel ni olib tashlaymiz va qolgan hamma whitespace bo'yicha bo'lamiz
     text = message.text
-    parts = text.split()
-    imeis = [p.strip() for p in parts[1:] if p.strip()]
+
+    # Убираем саму команду и собираем все числа 10–20 знаков
+    # (вдруг человек напишет в несколько строк)
+    all_numbers = re.findall(r"\d{10,20}", text)
+    imeis = [n.strip() for n in all_numbers]
 
     if not imeis:
         bot.reply_to(
             message,
-            "❗ IMEIлар ёзинг.\nМисол:\n"
+            "❗ Укажите IMEI после команды.\nПример:\n"
             "<code>/excel\n3540...\n3535...\n3536...</code>",
         )
         return
 
     info_map = {}
 
-    # Har bir IMEI uchun alohida javob + info_mapga saqlash
+    # Для каждого IMEI — отдельный текстовый ответ
     for imei in imeis:
         data = fetch_imei_data(imei)
         info = parse_imei(data)
@@ -192,7 +198,7 @@ def excel_handler(message):
         answer = format_text_answer(imei, info)
         bot.send_message(message.chat.id, answer)
 
-    # Xlsx fayl yaratamiz
+    # Создаём XLSX-файл
     file_path = create_excel_xlsx(imeis, info_map)
     with open(file_path, "rb") as f:
         bot.send_document(
@@ -203,22 +209,32 @@ def excel_handler(message):
 
 
 @bot.message_handler(content_types=["text"])
-def single_imei_handler(message):
+def text_handler(message):
     """
-    Oddiy text kelganda – bitta IMEI deb hisoblaymiz.
+    Любой текст БЕЗ команды /excel:
+    - Если нашли 1 IMEI → один ответ.
+    - Если нашли несколько IMEI → по каждому отдельный ответ.
+    - Excel НЕ отправляем.
     """
-    imei = message.text.strip()
+    text = message.text
 
-    # Juda oddiy filter: faqat raqam va uzunligi 14–17 oralig'ida
-    if not imei.isdigit() or not (10 <= len(imei) <= 20):
-        bot.reply_to(message, "❗ Пожалуйста, отправьте корректный IMEI (только цифры).")
+    # Ищем все последовательности цифр длиной 10–20
+    imeis = re.findall(r"\d{10,20}", text)
+
+    if not imeis:
+        bot.reply_to(
+            message,
+            "❗ Пожалуйста, отправьте IMEI (только цифры).\n"
+            "Можно один или несколько IMEI в одном сообщении."
+        )
         return
 
-    data = fetch_imei_data(imei)
-    info = parse_imei(data)
-    answer = format_text_answer(imei, info)
-    bot.reply_to(message, answer)
+    for imei in imeis:
+        data = fetch_imei_data(imei)
+        info = parse_imei(data)
+        answer = format_text_answer(imei, info)
+        bot.send_message(message.chat.id, answer)
 
 
-print("Bot ishga tushdi...")
+print("Бот запущен...")
 bot.infinity_polling(skip_pending=True)
