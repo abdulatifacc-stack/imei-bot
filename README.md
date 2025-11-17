@@ -1,13 +1,15 @@
-[bot.py](https://github.com/user-attachments/files/23573203/bot.py)
 import telebot
 import requests
 import json
+import os   # TOKENni environmentdan olish uchun
 
-# 🔑 Ваш токен сюда
-TOKEN = "8492570853:AAHk4o4uDr8lQuGyfVBCnZyd-szvghOQS1A"
+# TOKEN endi kodda bo'lmaydi!
+TOKEN = os.getenv("TOKEN")
+
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
 API_URL = "https://www.imei.kg/api/phys/imei/status?imei={imei}"
+
 
 def format_answer(imei: str, data: dict) -> str:
     d = data.get("data", {}) or {}
@@ -18,7 +20,7 @@ def format_answer(imei: str, data: dict) -> str:
     reg = d.get("registrationStatus", {}) or {}
     status_code = (reg.get("status") or "").upper()
 
-    # Русский вариант статусa + emoji
+    # Русский вариант + emoji
     if status_code == "REGISTERED":
         status_emoji = "✅"
         status_text = "Зарегистрирован"
@@ -44,8 +46,7 @@ def format_answer(imei: str, data: dict) -> str:
 def start(message):
     bot.reply_to(
         message,
-        "Здравствуйте! 👋\n"
-        "Отправьте один или несколько IMEI (каждый с новой строки)."
+        "Здравствуйте! 👋\nОтправьте один или несколько IMEI (каждый с новой строки)."
     )
 
 
@@ -57,17 +58,15 @@ def check_imei(message):
     if not imeis:
         bot.reply_to(
             message,
-            "❌ Это не похоже на IMEI.\n"
-            "Отправьте 14–17 значный IMEI."
+            "❌ Это не похоже на IMEI.\nОтправьте 14–17 значный IMEI."
         )
         return
 
-    # Har bir IMEI uchun alohida javob
     for imei in imeis:
         try:
             r = requests.get(API_URL.format(imei=imei), timeout=10)
         except:
-            bot.reply_to(message, f"❌ IMEI <b>{imei}</b>: ошибка подключения к серверу.")
+            bot.reply_to(message, f"❌ IMEI <b>{imei}</b>: ошибка подключения.")
             continue
 
         if r.status_code != 200:
@@ -77,18 +76,18 @@ def check_imei(message):
         try:
             data = r.json()
         except:
-            bot.reply_to(message, f"❌ IMEI <b>{imei}</b>: неверный ответ сервера.")
+            bot.reply_to(message, f"❌ IMEI <b>{imei}</b>: неверный ответ от сервера.")
             continue
 
         if data.get("status") != "SUCCESS":
             bot.reply_to(
                 message,
-                f"❌ IMEI <b>{imei}</b>: {data.get('message', 'Неизвестная ошибка')}"
+                f"❌ IMEI <b>{imei}</b>: {data.get('message', 'Ошибка')}"
             )
             continue
 
         bot.reply_to(message, format_answer(imei, data))
 
 
-print("Bot запущен...")
+print("Bot zapущен...")
 bot.infinity_polling(skip_pending=True)
