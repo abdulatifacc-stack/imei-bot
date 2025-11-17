@@ -4,7 +4,7 @@ import telebot
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
-# TOKENni Render / Environment Variables ichida TOKEN nomi bilan bergansiz
+# TOKEN environmentdan
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("Environmentda TOKEN topilmadi!")
@@ -14,32 +14,16 @@ bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 API_URL = "https://www.imei.kg/api/phys/imei/status?imei={imei}"
 
 
-# ---------- API bilan ishlash ----------
-
 def call_api(imei: str) -> dict:
-    """
-    Bitta IMEI bo'yicha API dan ma'lumot olib keladi.
-    Natija har doim shu formatda:
-    - ok = True  bo'lsa: fullname, status_text, status_code bor
-    - ok = False bo'lsa: error matni bor
-    """
     try:
         r = requests.get(API_URL.format(imei=imei), timeout=15)
         data = r.json()
     except Exception:
-        return {
-            "ok": False,
-            "imei": imei,
-            "error": "Сервер ошибка"
-        }
+        return {"ok": False, "imei": imei, "error": "Сервер ошибка"}
 
     if data.get("status") != "SUCCESS":
         msg = data.get("message") or "IMEI не найден"
-        return {
-            "ok": False,
-            "imei": imei,
-            "error": msg
-        }
+        return {"ok": False, "imei": imei, "error": msg}
 
     d = data.get("data") or {}
     reg = d.get("registrationStatus") or {}
@@ -66,21 +50,13 @@ def call_api(imei: str) -> dict:
         "imei": imei,
         "fullname": fullname,
         "status_text": status_text,
-        "status_code": short_code
+        "status_code": short_code,
     }
 
 
-# ---------- Telegram javobi (bitta IMEI) ----------
-
 def format_text_answer(res: dict) -> str:
-    """
-    Bitta IMEI uchun chiroyli matnli javob.
-    """
     if not res["ok"]:
-        return (
-            f"❌ IMEI: <code>{res['imei']}</code>\n"
-            f"Статус: {res['error']}"
-        )
+        return f"❌ IMEI: <code>{res['imei']}</code>\nСтатус: {res['error']}"
 
     if res["status_code"] == "REGISTERED":
         emoji = "✅"
@@ -96,24 +72,16 @@ def format_text_answer(res: dict) -> str:
     )
 
 
-# ---------- Excel (.xlsx) yaratish ----------
-
 def create_excel(results: list) -> str:
-    """
-    results — call_api dan qaytgan obyektlar ro'yxati.
-    Excel fayl yaratib, fayl nomini qaytaradi.
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = "IMEI"
 
-    # Sarlavhalar
     ws.append(["Полное название", "IMEI", "Статус"])
 
-    # Ranglar (faqat status ustuniga)
-    green_fill = PatternFill("solid", fgColor="C6EFCE")  # registered
-    red_fill = PatternFill("solid", fgColor="FFC7CE")    # unregistered / error
-    grey_fill = PatternFill("solid", fgColor="D9D9D9")   # unknown
+    green_fill = PatternFill("solid", fgColor="C6EFCE")
+    red_fill = PatternFill("solid", fgColor="FFC7CE")
+    grey_fill = PatternFill("solid", fgColor="D9D9D9")
 
     for res in results:
         if not res["ok"]:
@@ -129,7 +97,6 @@ def create_excel(results: list) -> str:
                 fill = grey_fill
 
         ws.append(row)
-        # Oxirgi qo'shilgan qatordagi 3-ustun (Статус)ni bo'yash
         status_cell = ws.cell(row=ws.max_row, column=3)
         status_cell.fill = fill
 
@@ -137,8 +104,6 @@ def create_excel(results: list) -> str:
     wb.save(filename)
     return filename
 
-
-# ---------- /start va IMEI handlerlar ----------
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -154,13 +119,6 @@ def start(message):
 
 
 def extract_imeis(text: str) -> list:
-    """
-    Matndan faqat raqamli IMEIlarni ajratib oladi.
-    /excel 123 456
-    yoki
-    /excel\n123\n456
-    ham ishlaydi.
-    """
     parts = text.replace("\n", " ").split()
     imeis = [p for p in parts if p.isdigit()]
     return imeis
@@ -181,10 +139,7 @@ def handle_excel(message):
         )
         return
 
-    results = []
-    for imei in imeis:
-        res = call_api(imei)
-        results.append(res)
+    results = [call_api(i) for i in imeis]
 
     file_name = create_excel(results)
 
