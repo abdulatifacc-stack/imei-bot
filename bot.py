@@ -73,29 +73,31 @@ def parse_imei(data: dict) -> dict:
         "status_code": status_code,
         "status_text": status_text,
     }
-
-
 def format_text_answer(imei: str, info: dict) -> str:
-    """Формируем текстовый ответ для одного IMEI (на русском)."""
+    """
+    Bir dona IMEI uchun javob.
+    Tepada 📱 + IMEI (oddiy matn),
+    pastda kichik code-blok – ustiga bossa oson kopiya bo‘ladi.
+    """
     model = info["model"]
     fullname = info["fullname"]
     status_code = info["status_code"]
     status_text = info["status_text"]
 
+    # Emoji статуса
     if status_code == "REGISTERED":
-        emoji = "✅"
+        status_emoji = "✅"
     elif status_code == "UNREGISTERED":
-        emoji = "❌"
+        status_emoji = "❌"
     else:
-        emoji = "ℹ️"
+        status_emoji = "ℹ️"
 
     text = f"""
-📱 <b>IMEI:</b> <code>{imei}</code>
+📱 {imei}
 
-<b>Модель:</b> {model}
-<b>Полное название:</b> {fullname}
-
-<b>Статус:</b> {emoji} {status_text}
+<pre><code>Полное название: {fullname}
+IMEI: {imei}
+Статус: {status_emoji} {status_text}</code></pre>
 """
     return text.strip()
 
@@ -246,3 +248,4 @@ def text_handler(message):
 
 print("Бот запущен...")
 bot.infinity_polling(skip_pending=True)
+
