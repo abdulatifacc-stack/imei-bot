@@ -1,163 +1,223 @@
 import os
+import json
 import requests
 import telebot
+
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
-# TOKEN environmentdan
+# TOKEN environmentdan olinadi (Render → Environment → TOKEN)
 TOKEN = os.getenv("TOKEN")
-if not TOKEN:
-    raise RuntimeError("Environmentda TOKEN topilmadi!")
-
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
 API_URL = "https://www.imei.kg/api/phys/imei/status?imei={imei}"
 
 
-def call_api(imei: str) -> dict:
+def fetch_imei_data(imei: str) -> dict:
+    """
+    IMEI bo'yicha API'dan ma'lumot olib keladi.
+    Xato bo'lsa ham dict qaytaradi.
+    """
     try:
-        r = requests.get(API_URL.format(imei=imei), timeout=15)
-        data = r.json()
+        r = requests.get(API_URL.format(imei=imei), timeout=10)
+        return r.json()
     except Exception:
-        return {"ok": False, "imei": imei, "error": "Сервер ошибка"}
+        return {"status": "ERROR", "message": "Request failed"}
 
+
+def parse_imei(data: dict) -> dict:
+    """
+    API javobini qulay formatga keltiramiz.
+    Qaytadi: {
+      "model": ...,
+      "fullname": ...,
+      "status_code": "REGISTERED"/"UNREGISTERED"/"UNKNOWN",
+      "status_text": "Зарегистрирован"/...,
+    }
+    """
+    # Agar SUCCESS bo'lmasa, xato deb hisoblaymiz
     if data.get("status") != "SUCCESS":
-        msg = data.get("message") or "IMEI не найден"
-        return {"ok": False, "imei": imei, "error": msg}
+        return {
+            "model": "Неизвестно",
+            "fullname": "Неизвестно",
+            "status_code": "UNKNOWN",
+            "status_text": "Ошибка или неверный IMEI",
+        }
 
-    d = data.get("data") or {}
-    reg = d.get("registrationStatus") or {}
+    d = data.get("data", {}) or {}
+
+    model = (
+        d.get("gsmaMarketingName")
+        or d.get("standardisedFullName")
+        or "Неизвестно"
+    )
+    fullname = d.get("standardisedFullName") or model
+
+    reg = d.get("registrationStatus", {}) or {}
     status_code = (reg.get("status") or "").upper()
 
     if status_code == "REGISTERED":
         status_text = "Зарегистрирован"
-        short_code = "REGISTERED"
     elif status_code == "UNREGISTERED":
         status_text = "Не зарегистрирован"
-        short_code = "UNREGISTERED"
     else:
+        status_code = "UNKNOWN"
         status_text = "Неизвестно"
-        short_code = "UNKNOWN"
-
-    fullname = (
-        d.get("standardisedFullName")
-        or d.get("gsmaMarketingName")
-        or "Неизвестно"
-    )
 
     return {
-        "ok": True,
-        "imei": imei,
+        "model": model,
         "fullname": fullname,
+        "status_code": status_code,
         "status_text": status_text,
-        "status_code": short_code,
     }
 
 
-def format_text_answer(res: dict) -> str:
-    if not res["ok"]:
-        return f"❌ IMEI: <code>{res['imei']}</code>\nСтатус: {res['error']}"
+def format_text_answer(imei: str, info: dict) -> str:
+    """
+    Bitta IMEI uchun Telegramga chiqadigan matn.
+    """
+    model = info["model"]
+    fullname = info["fullname"]
+    status_code = info["status_code"]
+    status_text = info["status_text"]
 
-    if res["status_code"] == "REGISTERED":
+    if status_code == "REGISTERED":
         emoji = "✅"
-    elif res["status_code"] == "UNREGISTERED":
+    elif status_code == "UNREGISTERED":
         emoji = "❌"
     else:
         emoji = "ℹ️"
 
-    return (
-        f"📱 IMEI: <code>{res['imei']}</code>\n\n"
-        f"Полное название: {res['fullname']}\n"
-        f"Статус: {emoji} {res['status_text']}"
-    )
+    text = f"""
+📱 <b>IMEI:</b> <code>{imei}</code>
+
+<b>Модель:</b> {model}
+<b>Полное название:</b> {fullname}
+
+<b>Статус:</b> {emoji} {status_text}
+"""
+    return text.strip()
 
 
-def create_excel(results: list) -> str:
+def create_excel_xlsx(imei_list, info_map) -> str:
+    """
+    IMEIlar bo'yicha xlsx fayl yaratadi.
+    Ustunlar: Полное название / IMEI / Статус
+    Ranglar: yashil/qizil/ko'k.
+    """
     wb = Workbook()
     ws = wb.active
-    ws.title = "IMEI"
+    ws.title = "IMEI Report"
 
+    # Sarlavha
     ws.append(["Полное название", "IMEI", "Статус"])
 
-    green_fill = PatternFill("solid", fgColor="C6EFCE")
-    red_fill = PatternFill("solid", fgColor="FFC7CE")
-    grey_fill = PatternFill("solid", fgColor="D9D9D9")
+    # Ranglar
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    blue_fill = PatternFill(start_color="C6D9F1", end_color="C6D9F1", fill_type="solid")
 
-    for res in results:
-        if not res["ok"]:
-            row = ["—", res["imei"], f"Ошибка: {res['error']}"]
+    for imei in imei_list:
+        info = info_map.get(imei) or {
+            "fullname": "Неизвестно",
+            "status_code": "UNKNOWN",
+            "status_text": "Неизвестно",
+        }
+
+        fullname = info.get("fullname", "Неизвестно")
+        status_code = info.get("status_code", "UNKNOWN")
+        status_text = info.get("status_text", "Неизвестно")
+
+        row = ws.max_row + 1
+        ws.append([fullname, imei, status_text])
+
+        # Rangni statusga qarab beramiz
+        if status_code == "REGISTERED":
+            fill = green_fill
+        elif status_code == "UNREGISTERED":
             fill = red_fill
         else:
-            row = [res["fullname"], res["imei"], res["status_text"]]
-            if res["status_code"] == "REGISTERED":
-                fill = green_fill
-            elif res["status_code"] == "UNREGISTERED":
-                fill = red_fill
-            else:
-                fill = grey_fill
+            fill = blue_fill
 
-        ws.append(row)
-        status_cell = ws.cell(row=ws.max_row, column=3)
-        status_cell.fill = fill
+        # Faqat status ustuniga rang
+        ws[f"C{row}"].fill = fill
 
-    filename = "imei_results.xlsx"
-    wb.save(filename)
-    return filename
+    file_path = "imei_result.xlsx"
+    wb.save(file_path)
+    return file_path
 
 
-@bot.message_handler(commands=['start'])
-def start(message):
+@bot.message_handler(commands=["start"])
+def start_handler(message):
     text = (
-        "Assalomu alaykum! 👋\n\n"
-        "IMEI tekshirish uchun IMEI raqamini yuboring.\n"
-        "Bir nechta IMEI bo'yicha Excel olish uchun:\n"
-        "<code>/excel 354058249103607 353548756116480 ...</code>\n"
-        "yoki\n"
-        "<code>/excel</code> deb yozib, keyingi qatorda IMEI larni tashlang."
+        "Ассалому алейкум!\n\n"
+        "Бу бот IMEIни текшириб беради.\n"
+        "Просто отправьте IMEI (14–15 цифр).\n\n"
+        "📄 Для Excel отправьте:\n"
+        "<code>/excel</code> и далее список IMEI построчно."
     )
     bot.reply_to(message, text)
 
 
-def extract_imeis(text: str) -> list:
-    parts = text.replace("\n", " ").split()
-    imeis = [p for p in parts if p.isdigit()]
-    return imeis
-
-
-@bot.message_handler(commands=['excel'])
-def handle_excel(message):
-    imeis = extract_imeis(message.text)
+@bot.message_handler(commands=["excel"])
+def excel_handler(message):
+    """
+    /excel 3540... 3535...
+    yoki:
+    /excel
+    3540...
+    3535...
+    """
+    # /excel ni olib tashlaymiz va qolgan hamma whitespace bo'yicha bo'lamiz
+    text = message.text
+    parts = text.split()
+    imeis = [p.strip() for p in parts[1:] if p.strip()]
 
     if not imeis:
         bot.reply_to(
             message,
-            "IMEI larni ham yozing, masalan:\n"
-            "<code>/excel 354058249103607 353548756116480</code>\n"
-            "yoki:\n"
-            "<code>/excel</code>\n"
-            "354058249103607\n353548756116480"
+            "❗ IMEIлар ёзинг.\nМисол:\n"
+            "<code>/excel\n3540...\n3535...\n3536...</code>",
         )
         return
 
-    results = [call_api(i) for i in imeis]
+    info_map = {}
 
-    file_name = create_excel(results)
+    # Har bir IMEI uchun alohida javob + info_mapga saqlash
+    for imei in imeis:
+        data = fetch_imei_data(imei)
+        info = parse_imei(data)
+        info_map[imei] = info
 
-    with open(file_name, "rb") as f:
-        bot.send_document(message.chat.id, f)
+        answer = format_text_answer(imei, info)
+        bot.send_message(message.chat.id, answer)
+
+    # Xlsx fayl yaratamiz
+    file_path = create_excel_xlsx(imeis, info_map)
+    with open(file_path, "rb") as f:
+        bot.send_document(
+            message.chat.id,
+            f,
+            caption="📄 Excel (XLSX) по указанным IMEI",
+        )
 
 
-@bot.message_handler(content_types=['text'])
-def handle_imei(message):
+@bot.message_handler(content_types=["text"])
+def single_imei_handler(message):
+    """
+    Oddiy text kelganda – bitta IMEI deb hisoblaymiz.
+    """
     imei = message.text.strip()
 
-    if not imei.isdigit():
-        bot.reply_to(message, "Iltimos, faqat IMEI raqamini yuboring (faqat raqamlar).")
+    # Juda oddiy filter: faqat raqam va uzunligi 14–17 oralig'ida
+    if not imei.isdigit() or not (10 <= len(imei) <= 20):
+        bot.reply_to(message, "❗ Пожалуйста, отправьте корректный IMEI (только цифры).")
         return
 
-    res = call_api(imei)
-    text = format_text_answer(res)
-    bot.reply_to(message, text)
+    data = fetch_imei_data(imei)
+    info = parse_imei(data)
+    answer = format_text_answer(imei, info)
+    bot.reply_to(message, answer)
 
 
 print("Bot ishga tushdi...")
