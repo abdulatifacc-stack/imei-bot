@@ -249,3 +249,4 @@ def text_handler(message):
 print("Бот запущен...")
 bot.infinity_polling(skip_pending=True)
 
+
