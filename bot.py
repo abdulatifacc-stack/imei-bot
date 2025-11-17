@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import requests
 import telebot
 
@@ -9,10 +8,15 @@ from openpyxl.styles import PatternFill
 
 # TOKEN берём из переменной окружения (Render → Environment → TOKEN)
 TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise RuntimeError("Переменная окружения TOKEN не задана!")
+
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
 API_URL = "https://www.imei.kg/api/phys/imei/status?imei={imei}"
 
+
+# --------- API и парсинг ответа ---------
 
 def fetch_imei_data(imei: str) -> dict:
     """Запрос к API по IMEI. Всегда возвращает dict."""
@@ -72,7 +76,7 @@ def parse_imei(data: dict) -> dict:
 
 
 def format_text_answer(imei: str, info: dict) -> str:
-    """Формируем текстовый ответ для одного IMEI."""
+    """Формируем текстовый ответ для одного IMEI (на русском)."""
     model = info["model"]
     fullname = info["fullname"]
     status_code = info["status_code"]
@@ -95,6 +99,8 @@ def format_text_answer(imei: str, info: dict) -> str:
 """
     return text.strip()
 
+
+# --------- Создание Excel (XLSX) ---------
 
 def create_excel_xlsx(imei_list, info_map) -> str:
     """
@@ -149,14 +155,17 @@ def create_excel_xlsx(imei_list, info_map) -> str:
     return file_path
 
 
+# --------- Handlers ---------
+
 @bot.message_handler(commands=["start"])
 def start_handler(message):
     text = (
-        "Здравствуйте!\n\n"
+        "Здравствуйте! 👋\n\n"
         "Этот бот проверяет IMEI по базе imei.kg.\n"
-        "Просто отправьте один или несколько IMEI (каждый на новой строке или через пробел).\n\n"
-        "📄 Чтобы получить Excel (XLSX), отправьте команду:\n"
-        "<code>/excel</code> или <code>/exel</code>, а ниже список IMEI построчно."
+        "Просто отправьте один или несколько IMEI в одном сообщении "
+        "(каждый на новой строке или через пробел).\n\n"
+        "📄 Для Excel (XLSX) используйте команду:\n"
+        "<code>/excel</code> или <code>/exel</code>, затем список IMEI."
     )
     bot.reply_to(message, text)
 
@@ -164,18 +173,17 @@ def start_handler(message):
 @bot.message_handler(commands=["excel", "exel"])
 def excel_handler(message):
     """
-    Команда /excel или /exel:
+    /excel или /exel:
 
     /excel
     3540...
     3535...
 
-    — для этих IMEI бот отправит отдельные ответы + XLSX-файл.
+    → БОТ ТОЛЬКО отправляет XLSX-файл, без отдельных ответов по каждому IMEI.
     """
     text = message.text
 
-    # Убираем саму команду и собираем все числа 10–20 знаков
-    # (вдруг человек напишет в несколько строк)
+    # Ищем все последовательности цифр длиной 10–20 (IMEI)
     all_numbers = re.findall(r"\d{10,20}", text)
     imeis = [n.strip() for n in all_numbers]
 
@@ -189,14 +197,11 @@ def excel_handler(message):
 
     info_map = {}
 
-    # Для каждого IMEI — отдельный текстовый ответ
+    # Только собираем данные для файла, НИЧЕГО не отправляем поштучно
     for imei in imeis:
         data = fetch_imei_data(imei)
         info = parse_imei(data)
         info_map[imei] = info
-
-        answer = format_text_answer(imei, info)
-        bot.send_message(message.chat.id, answer)
 
     # Создаём XLSX-файл
     file_path = create_excel_xlsx(imeis, info_map)
@@ -211,14 +216,17 @@ def excel_handler(message):
 @bot.message_handler(content_types=["text"])
 def text_handler(message):
     """
-    Любой текст БЕЗ команды /excel:
-    - Если нашли 1 IMEI → один ответ.
-    - Если нашли несколько IMEI → по каждому отдельный ответ.
-    - Excel НЕ отправляем.
+    Любой текст БЕЗ /excel:
+    - Ищем все IMEI (10–20 цифр).
+    - По каждому IMEI отправляем отдельный ответ на русском.
+    - НИКАКОГО Excel здесь нет.
     """
     text = message.text
 
-    # Ищем все последовательности цифр длиной 10–20
+    # Если это другая команда (например /start), выходим
+    if text.startswith("/"):
+        return
+
     imeis = re.findall(r"\d{10,20}", text)
 
     if not imeis:
