@@ -19,68 +19,80 @@ API_URL = "https://www.imei.kg/api/phys/imei/status?imei={imei}"
 
 # --------- KG статус (SIM / срок регистрации) ---------
 
-def extract_kg_status_short(raw_data: dict) -> dict:
+def classify_kg_status(status_code: str, reg_info: dict) -> dict:
     """
-    Из полного JSON imei.kg вытащить короткий KG-статус.
-    Ищем по тексту знакомые русские фразы, которые ты показывал на скринах.
+    Қирғизистон SIM ва рўйхатдан ўтиш бўйича қисқа JB + Excel ранги.
 
-    Возвращает:
-    {
-        "kg_status_short": "🇰🇬 KG: ...",
-        "kg_color": "RED"/"BLUE"/"GREEN"/"NONE"
-    }
+    РАНГЛАР:
+      RED     → SIM не работала
+      PURPLE  → истёк 30-дневный период
+      BLUE    → срок до даты / просто UNREGISTERED
+      GREEN   → REGISTERED
+      GRAY    → неизвестно
     """
-    try:
-        text = json.dumps(raw_data, ensure_ascii=False)
-        lower = text.lower()
 
-        # 1) SIM хали умуман тушмаган (қизил)
-        # "Устройство не использовалось ни в одной из сетей мобильных операторов связи Кыргызской Республики."
-        if "не использовалось ни в одной из сетей мобильных операторов связи кыргызской республики" in lower:
-            return {
-                "kg_status_short": "🇰🇬 KG: SIM в сетях КР ещё не работала. 🔴",
-                "kg_color": "RED",
-            }
+    # Регистрация бўлимидаги барча текстларни йиғамиз
+    txt_parts = []
+    for v in (reg_info or {}).values():
+        if isinstance(v, str):
+            txt_parts.append(v)
+    txt = " ".join(txt_parts)
+    txt_low = txt.lower()
 
-        # 2) "Истёк 30-дневный триал период. Требуется регистрация устройства." (кўк)
-        if "истёк 30-дневный триал период" in lower:
-            return {
-                "kg_status_short": "🇰🇬 KG: истёк 30-дневный период, нужна регистрация. 🔵",
-                "kg_color": "BLUE",
-            }
+    # 0) REGISTERED → GREEN
+    if status_code == "REGISTERED":
+        return {
+            "kg_color": "GREEN",
+            "kg_chat": "🇰🇬 KG: зарегистрирован, можно пользоваться. 🟢",
+            "kg_excel": "Зарегистрирован, можно пользоваться",
+        }
 
-        # 3) "Срок регистрации устройства до 20.11.2025" (кўк, санали вариант)
-        m = re.search(r"Срок регистрации устройства до\s+(\d{2}\.\d{2}\.\d{4})", text)
+    # 1) SIM хали умуман тушмаган → RED
+    if "не использовалось ни в одной из сетей мобильных операторов связи кыргызской республики" in txt_low:
+        return {
+            "kg_color": "RED",
+            "kg_chat": "🇰🇬 KG: SIM в сетях КР ещё не работала. 🔴",
+            "kg_excel": "SIM в сетях КР ещё не работала",
+        }
+
+    # 2) истёк 30-дневный период → PURPLE
+    if ("истёк 30-дневный" in txt_low) or ("истек 30-дневный" in txt_low):
+        return {
+            "kg_color": "PURPLE",
+            "kg_chat": "🇰🇬 KG: истёк 30-дневный период, нужна регистрация. 🟣",
+            "kg_excel": "Истёк 30-дневный период, нужна регистрация",
+        }
+
+    # 3) срок регистрации до ДАТЫ → BLUE
+    if "срок регистрации" in txt_low:
+        m = re.search(r"до\s+(\d{2}\.\d{2}\.\d{4})", txt)
         if m:
             date = m.group(1)
             return {
-                "kg_status_short": f"🇰🇬 KG: до {date}, потом нужна регистрация. 🔵",
                 "kg_color": "BLUE",
+                "kg_chat": f"🇰🇬 KG: до {date}, потом нужна регистрация. 🔵",
+                "kg_excel": f"До {date}, потом нужна регистрация",
             }
 
-        # 4) Агар жуда аниқ "зарегистрирован в сетях ..." бўлса (ихтиёрий, яшил)
-        if "зарегистрирован в сетях" in lower:
-            return {
-                "kg_status_short": "🇰🇬 KG: зарегистрирован, можно пользоваться. 🟢",
-                "kg_color": "GREEN",
-            }
+    # 4) просто UNREGISTERED → BLUE
+    if status_code == "UNREGISTERED":
+        return {
+            "kg_color": "BLUE",
+            "kg_chat": "🇰🇬 KG: не зарегистрирован, нужна регистрация. 🔵",
+            "kg_excel": "Не зарегистрирован, нужна регистрация",
+        }
 
-        # Агар ҳеч нарса тушунарли чиқмаса
-        return {
-            "kg_status_short": "🇰🇬 KG: статус не удалось определить, проверьте на imei.kg. ⚪️",
-            "kg_color": "NONE",
-        }
-    except Exception:
-        return {
-            "kg_status_short": "🇰🇬 KG: ошибка при разборе статуса, проверьте на imei.kg. ⚪️",
-            "kg_color": "NONE",
-        }
+    # 5) Номаълум → GRAY
+    return {
+        "kg_color": "GRAY",
+        "kg_chat": "🇰🇬 KG: статус не удалось определить. ⚪️",
+        "kg_excel": "Статус не удалось определить",
+    }
 
 
 # --------- API и парсинг ответа ---------
 
 def fetch_imei_data(imei: str) -> dict:
-    """Запрос к API по IMEI. Всегда возвращает dict."""
     try:
         r = requests.get(API_URL.format(imei=imei), timeout=10)
         return r.json()
@@ -89,32 +101,18 @@ def fetch_imei_data(imei: str) -> dict:
 
 
 def parse_imei(data: dict) -> dict:
-    """
-    Приводим ответ API к удобному виду.
-
-    Возвращаем:
-    {
-      "model": ...,
-      "fullname": ...,
-      "status_code": "REGISTERED"/"UNREGISTERED"/"UNKNOWN",
-      "status_text": "Зарегистрирован"/...,
-      "kg_status_short": "🇰🇬 KG: ...",
-      "kg_color": "RED"/"BLUE"/"GREEN"/"NONE"
-    }
-    """
-    # KG-статус тасаввуридан қатьи назар, бутун JSONдан излаймиз
-    kg_info = extract_kg_status_short(data)
-    kg_status_short = kg_info["kg_status_short"]
-    kg_color = kg_info["kg_color"]
-
     if data.get("status") != "SUCCESS":
+        kg = {
+            "kg_color": "GRAY",
+            "kg_chat": "🇰🇬 KG: ошибка при запросе. ⚪️",
+            "kg_excel": "Ошибка при запросе",
+        }
         return {
             "model": "Неизвестно",
             "fullname": "Неизвестно",
             "status_code": "UNKNOWN",
             "status_text": "Ошибка или неверный IMEI",
-            "kg_status_short": kg_status_short,
-            "kg_color": kg_color,
+            **kg,
         }
 
     d = data.get("data", {}) or {}
@@ -137,121 +135,90 @@ def parse_imei(data: dict) -> dict:
         status_code = "UNKNOWN"
         status_text = "Неизвестно"
 
+    kg = classify_kg_status(status_code, reg)
+
     return {
         "model": model,
         "fullname": fullname,
         "status_code": status_code,
         "status_text": status_text,
-        "kg_status_short": kg_status_short,
-        "kg_color": kg_color,
+        "kg_color": kg["kg_color"],
+        "kg_chat": kg["kg_chat"],
+        "kg_excel": kg["kg_excel"],
     }
 
 
 def format_text_answer(imei: str, info: dict) -> str:
-    """
-    Bir dona IMEI uchun javob.
-    Tepada 📱 + IMEI (oddiy matn),
-    pastda kichik code-blok – ustiga bossa oson kopiya bo‘ladi.
-    Ichida KG qisqa jb ham bor.
-    """
     model = info["model"]
     fullname = info["fullname"]
     status_code = info["status_code"]
     status_text = info["status_text"]
-    kg_status_short = info.get("kg_status_short", "")
+    kg_chat = info["kg_chat"]
 
-    # Emoji статуса регистрации (imei.kg API)
     if status_code == "REGISTERED":
-        status_emoji = "✅"
+        emoji = "✅"
     elif status_code == "UNREGISTERED":
-        status_emoji = "❌"
+        emoji = "❌"
     else:
-        status_emoji = "ℹ️"
-
-    kg_line = f"\n{kg_status_short}" if kg_status_short else ""
+        emoji = "ℹ️"
 
     text = f"""
 📱 {imei}
 
 <pre><code>Полное название: {fullname}
 IMEI: {imei}
-Статус: {status_emoji} {status_text}{kg_line}</code></pre>
+Статус: {emoji} {status_text}
+{kg_chat}</code></pre>
 """
     return text.strip()
 
 
-# --------- Создание Excel (XLSX) ---------
+# --------- Excel ---------
 
 def create_excel_xlsx(imei_list, info_map) -> str:
-    """
-    Создаём XLSX-файл по списку IMEI.
-
-    Колонки:
-      - Полное название
-      - IMEI
-      - Статус регистрации (REGISTERED/UNREGISTERED/UNKNOWN)
-      - KG статус (коротко, JB)
-
-    Цвета:
-      - зелёный: зарегистрирован (регистрация)
-      - красный: не зарегистрирован (регистрация)
-      - синий: неизвестно / ошибка (регистрация)
-      + для KG-статуса:
-        - RED  → ячейка синхронно красная
-        - BLUE → ячейка синяя
-        - GREEN→ ячейка зелёная
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = "IMEI Report"
 
-    # Заголовки
     ws.append(["Полное название", "IMEI", "Статус регистрации", "KG статус"])
 
-    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    blue_fill = PatternFill(start_color="C6D9F1", end_color="C6D9F1", fill_type="solid")
+    green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    red   = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    blue  = PatternFill(start_color="C6D9F1", end_color="C6D9F1", fill_type="solid")
+    purple = PatternFill(start_color="E6B8F7", end_color="E6B8F7", fill_type="solid")  # фиолет
+    gray  = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
 
     for imei in imei_list:
-        info = info_map.get(imei) or {
-            "fullname": "Неизвестно",
-            "status_code": "UNKNOWN",
-            "status_text": "Неизвестно",
-            "kg_status_short": "",
-            "kg_color": "NONE",
-        }
+        info = info_map[imei]
 
-        fullname = info.get("fullname", "Неизвестно")
-        status_code = info.get("status_code", "UNKNOWN")
-        status_text = info.get("status_text", "Неизвестно")
-        kg_status_short = info.get("kg_status_short", "")
-        kg_color = info.get("kg_color", "NONE")
+        fullname = info["fullname"]
+        status_text = info["status_text"]
+        kg_excel = info["kg_excel"]
+        kg_color = info["kg_color"]
+        status_code = info["status_code"]
 
-        # Следующая свободная строка
         row = ws.max_row + 1
-        ws.append([fullname, imei, status_text, kg_status_short])
+        ws.append([fullname, imei, status_text, kg_excel])
 
-        # Цвет по статусу регистрации (колонка C)
+        # Колонка C — общий статус
         if status_code == "REGISTERED":
-            fill_reg = green_fill
+            ws[f"C{row}"].fill = green
         elif status_code == "UNREGISTERED":
-            fill_reg = red_fill
+            ws[f"C{row}"].fill = red
         else:
-            fill_reg = blue_fill
-        ws[f"C{row}"].fill = fill_reg
+            ws[f"C{row}"].fill = blue
 
-        # Цвет по KG-статусу (колонка D)
+        # Колонка D — KG статус
         if kg_color == "RED":
-            fill_kg = red_fill
+            ws[f"D{row}"].fill = red
         elif kg_color == "BLUE":
-            fill_kg = blue_fill
+            ws[f"D{row}"].fill = blue
         elif kg_color == "GREEN":
-            fill_kg = green_fill
-        else:
-            fill_kg = None
-
-        if fill_kg:
-            ws[f"D{row}"].fill = fill_kg
+            ws[f"D{row}"].fill = green
+        elif kg_color == "PURPLE":
+            ws[f"D{row}"].fill = purple
+        elif kg_color == "GRAY":
+            ws[f"D{row}"].fill = gray
 
     file_path = "imei_result.xlsx"
     wb.save(file_path)
@@ -262,90 +229,51 @@ def create_excel_xlsx(imei_list, info_map) -> str:
 
 @bot.message_handler(commands=["start"])
 def start_handler(message):
-    text = (
+    bot.reply_to(
+        message,
         "Здравствуйте! 👋\n\n"
-        "Этот бот проверяет IMEI по базе imei.kg.\n"
-        "Показывает модель, статус регистрации и KG-статус (SIM/срок регистрации).\n\n"
-        "Просто отправьте один или несколько IMEI в одном сообщении "
-        "(каждый на новой строке или через пробел).\n\n"
-        "📄 Для Excel (XLSX) используйте команду:\n"
-        "<code>/excel</code> или <code>/exel</code>, затем список IMEI."
+        "Отправьте IMEI (один или несколько).\n"
+        "Бот покажет статус регистрации и KG-статус (SIM/срок регистрации).\n\n"
+        "Excel версия → команда /excel"
     )
-    bot.reply_to(message, text)
 
 
 @bot.message_handler(commands=["excel", "exel"])
 def excel_handler(message):
-    """
-    /excel или /exel:
-
-    /excel
-    3540...
-    3535...
-
-    → БОТ ТОЛЬКО отправляет XLSX-файл, без отдельных ответов по каждому IMEI.
-    """
     text = message.text
-
-    # Ищем все последовательности цифр длиной 10–20 (IMEI)
-    all_numbers = re.findall(r"\d{10,20}", text)
-    imeis = [n.strip() for n in all_numbers]
+    numbers = re.findall(r"\d{10,20}", text)
+    imeis = [n.strip() for n in numbers]
 
     if not imeis:
-        bot.reply_to(
-            message,
-            "❗ Укажите IMEI после команды.\nПример:\n"
-            "<code>/excel\n3540...\n3535...\n3536...</code>",
-        )
+        bot.reply_to(message, "❗ После команды укажите IMEI списком.")
         return
 
     info_map = {}
-
-    # Только собираем данные для файла, НИЧЕГО не отправляем поштучно
     for imei in imeis:
         data = fetch_imei_data(imei)
-        info = parse_imei(data)
-        info_map[imei] = info
+        info_map[imei] = parse_imei(data)
 
-    # Создаём XLSX-файл
-    file_path = create_excel_xlsx(imeis, info_map)
-    with open(file_path, "rb") as f:
-        bot.send_document(
-            message.chat.id,
-            f,
-            caption="📄 Excel (XLSX) по указанным IMEI",
-        )
+    path = create_excel_xlsx(imeis, info_map)
+    with open(path, "rb") as f:
+        bot.send_document(message.chat.id, f, caption="📄 Excel готов!")
 
 
 @bot.message_handler(content_types=["text"])
 def text_handler(message):
-    """
-    Любой текст БЕЗ /excel:
-    - Ищем все IMEI (10–20 цифр).
-    - По каждому IMEI отправляем отдельный ответ на русском.
-    - НИКАКОГО Excel здесь нет.
-    """
     text = message.text
 
-    # Если это другая команда (например /start), выходим
     if text.startswith("/"):
         return
 
     imeis = re.findall(r"\d{10,20}", text)
-
     if not imeis:
-        bot.reply_to(
-            message,
-            "❗ Пожалуйста, отправьте IMEI (только цифры).\n"
-            "Можно один или несколько IMEI в одном сообщении."
-        )
+        bot.reply_to(message, "❗ Отправьте IMEI (можно несколько).")
         return
 
     for imei in imeis:
         data = fetch_imei_data(imei)
         info = parse_imei(data)
-        answer = format_text_answer(imei, info)
-        bot.send_message(message.chat.id, answer)
+        bot.send_message(message.chat.id, format_text_answer(imei, info))
 
 
 print("Бот запущен...")
