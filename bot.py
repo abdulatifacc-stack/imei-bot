@@ -1,170 +1,103 @@
+# imei_bot_single_column.py
 import os
 import re
 import json
 import requests
 import telebot
 
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill
+# Google Sheets
+import gspread
+from google.oauth2.service_account import Credentials
 
-# ---------- ADMIN SOZLAMALARI ----------
-
-# Bu yerga O'ZINGIZNING Telegram ID'ingizni yozasiz!
-# O'zingizni @userinfobot ga /start deb yozib, ID ni olasiz.
+# ---------- ADMIN VA FAYLLAR ----------
 ADMIN_ID = 357556285
+USERS_FILE = "users.json"                 # foydalanuvchilar ro'yxati
+CHECKED_FILE = "checked_imeis.json"       # oldin tekshirilgan IMEI lar
+MODEL_CONF_FILE = "model_config.json"     # {"header": "iPhone 16 PM"}
 
-USERS_FILE = "users.json"   # Foydalanuvchilar ro'yxatini shu faylga yozamiz
+# Google Sheets: ID yoki nom
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "")         # tavsiya: ID
+SHEET_NAME     = os.getenv("SHEET_NAME", "IMEI_Table")    # ID bo'lmasa, nom
 
-# TOKEN берём из переменной окружения (Render → Environment → TOKEN)
+# Service Account JSON (siz yuklagan fayl)
+SERVICE_ACCOUNT_FILE = "/mnt/data/pristine-disk-479021-t5-5a15549085f2.json"
+
+# Telegram token
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("Переменная окружения TOKEN не задана!")
-
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
+# IMEI API
 API_URL = "https://www.imei.kg/api/phys/imei/status?imei={imei}"
 
-
-# ---------- FOYDALANUVCHINI SAQLASH / ADMINGA JB ----------
-
-def save_user(message):
-    """
-    Botdan foydalangan userlarni users.json ga yozib boramiz.
-    """
-    user = message.from_user
-    uid = str(user.id)
-    username = user.username or ""
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-
+# ---------- YORDAMCHILAR (LOCAL STORAGE) ----------
+def _load_json(path, default):
     try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except FileNotFoundError:
-        data = {}
+        return default
 
-    # Mavjud bo'lsa yangilaymiz, bo'lmasa qo'shamiz
-    data[uid] = {
-        "username": username,
-        "first_name": first_name,
-        "last_name": last_name,
-    }
-
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
+def _save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def _load_checked():
+    # { "356....": "Apple iPhone 16 Pro Max ...", ... }
+    return _load_json(CHECKED_FILE, {})
+
+def _save_checked(db: dict):
+    _save_json(CHECKED_FILE, db)
+
+def record_checked_imei(imei: str, fullname: str):
+    db = _load_checked()
+    db[str(imei)] = fullname or ""
+    _save_checked(db)
+
+def _get_model_header():
+    cfg = _load_json(MODEL_CONF_FILE, {})
+    return cfg.get("header", "").strip()
+
+def _set_model_header(header: str):
+    _save_json(MODEL_CONF_FILE, {"header": header.strip()})
+
+# ---------- USER/ADMIN LOG ----------
+def save_user(message):
+    u = message.from_user
+    uid = str(u.id)
+    data = _load_json(USERS_FILE, {})
+    data[uid] = {
+        "username": u.username or "",
+        "first_name": u.first_name or "",
+        "last_name": u.last_name or "",
+    }
+    _save_json(USERS_FILE, data)
 
 def notify_admin_imeis(message, imeis):
-    """
-    IMEI ishlatilganida adminga kim ishlatgani haqida JB yuborish.
-    """
     if not ADMIN_ID:
-        return  # ADMIN_ID qo'yilmagan bo'lsa, hech narsa qilmaymiz
-
-    user = message.from_user
-    chat = message.chat
-
-    username = f"@{user.username}" if user.username else "—"
-    full_name = " ".join(
-        part for part in [user.first_name, user.last_name] if part
-    ) or "—"
-
+        return
+    u = message.from_user
+    username = f"@{u.username}" if u.username else "—"
+    full_name = " ".join(x for x in [u.first_name, u.last_name] if x) or "—"
     imei_text = "\n".join(f"• {i}" for i in imeis)
-
     text = f"""
 🟢 IMEI botdan foydalanildi
 
-👤 User ID: <code>{user.id}</code>
+👤 User ID: <code>{u.id}</code>
 🔗 Username: {username}
 👤 Ism: {full_name}
-💬 Chat ID: <code>{chat.id}</code>
+💬 Chat ID: <code>{message.chat.id}</code>
 
 📱 IMEI(lar):
 {imei_text}
 """
-
     try:
         bot.send_message(ADMIN_ID, text.strip())
     except Exception:
-        # Adminga jo'natishda xato bo'lsa, bot ishini to'xtatmaymiz
         pass
 
-
-# --------- KG статус (SIM / срок регистрации) ---------
-
-def classify_kg_status(status_code: str, reg_info: dict) -> dict:
-    """
-    Қирғизистон SIM ва рўйхатдан ўтиш бўйича қисқа JB + Excel ранги.
-
-    РАНГЛАР:
-      RED     → SIM не работала
-      PURPLE  → истёк 30-дневный период
-      BLUE    → срок до даты / просто UNREGISTERED
-      GREEN   → REGISTERED
-      GRAY    → неизвестно
-    """
-
-    # Регистрация бўлимидаги барча текстларни йиғамиз
-    txt_parts = []
-    for v in (reg_info or {}).values():
-        if isinstance(v, str):
-            txt_parts.append(v)
-    txt = " ".join(txt_parts)
-    txt_low = txt.lower()
-
-    # 0) REGISTERED → GREEN
-    if status_code == "REGISTERED":
-        return {
-            "kg_color": "GREEN",
-            "kg_chat": "🇰🇬 KG: зарегистрирован, можно пользоваться. 🟢",
-            "kg_excel": "Зарегистрирован, можно пользоваться",
-        }
-
-    # 1) SIM хали умуман тушмаган → RED
-    if "не использовалось ни в одной из сетей мобильных операторов связи кыргызской республики" in txt_low:
-        return {
-            "kg_color": "RED",
-            "kg_chat": "🇰🇬 KG: SIM в сетях КР ещё не работала. 🔴",
-            "kg_excel": "SIM в сетях КР ещё не работала",
-        }
-
-    # 2) истёк 30-дневный период → PURPLE
-    if ("истёк 30-дневный" in txt_low) or ("истек 30-дневный" in txt_low):
-        return {
-            "kg_color": "PURPLE",
-            "kg_chat": "🇰🇬 KG: истёк 30-дневный период, нужна регистрация. 🟣",
-            "kg_excel": "Истёк 30-дневный период, нужна регистрация",
-        }
-
-    # 3) срок регистрации до ДАТЫ → BLUE
-    if "срок регистрации" in txt_low:
-        m = re.search(r"до\s+(\d{2}\.\d{2}\.\d{4})", txt)
-        if m:
-            date = m.group(1)
-            return {
-                "kg_color": "BLUE",
-                "kg_chat": f"🇰🇬 KG: до {date}, потом нужна регистрация. 🔵",
-                "kg_excel": f"До {date}, потом нужна регистрация",
-            }
-
-    # 4) просто UNREGISTERED → BLUE
-    if status_code == "UNREGISTERED":
-        return {
-            "kg_color": "BLUE",
-            "kg_chat": "🇰🇬 KG: не зарегистрирован, нужна регистрация. 🔵",
-            "kg_excel": "Не зарегистрирован, нужна регистрация",
-        }
-
-    # 5) Номаълум → GRAY
-    return {
-        "kg_color": "GRAY",
-        "kg_chat": "🇰🇬 KG: статус не удалось определить. ⚪️",
-        "kg_excel": "Статус не удалось определить",
-    }
-
-
-# --------- API и парсинг ответа ---------
-
+# ---------- API va PARSING ----------
 def fetch_imei_data(imei: str) -> dict:
     try:
         r = requests.get(API_URL.format(imei=imei), timeout=10)
@@ -172,34 +105,21 @@ def fetch_imei_data(imei: str) -> dict:
     except Exception:
         return {"status": "ERROR", "message": "Request failed"}
 
-
 def parse_imei(data: dict) -> dict:
     if data.get("status") != "SUCCESS":
-        kg = {
-            "kg_color": "GRAY",
-            "kg_chat": "🇰🇬 KG: ошибка при запросе. ⚪️",
-            "kg_excel": "Ошибка при запросе",
-        }
         return {
             "model": "Неизвестно",
             "fullname": "Неизвестно",
             "status_code": "UNKNOWN",
             "status_text": "Ошибка или неверный IMEI",
-            **kg,
+            "kg_chat": "🇰🇬 KG: ошибка при запросе. ⚪️",
         }
-
     d = data.get("data", {}) or {}
-
-    model = (
-        d.get("gsmaMarketingName")
-        or d.get("standardisedFullName")
-        or "Неизвестно"
-    )
+    model = d.get("gsmaMarketingName") or d.get("standardisedFullName") or "Неизвестно"
     fullname = d.get("standardisedFullName") or model
 
     reg = d.get("registrationStatus", {}) or {}
     status_code = (reg.get("status") or "").upper()
-
     if status_code == "REGISTERED":
         status_text = "Зарегистрирован"
     elif status_code == "UNREGISTERED":
@@ -208,161 +128,188 @@ def parse_imei(data: dict) -> dict:
         status_code = "UNKNOWN"
         status_text = "Неизвестно"
 
-    kg = classify_kg_status(status_code, reg)
-
+    # kg_chat faqat ma'lumot uchun
+    kg_chat = "🇰🇬 KG: информация получена."  # qisqa, batafsil kerak bo'lmasa
     return {
         "model": model,
         "fullname": fullname,
         "status_code": status_code,
         "status_text": status_text,
-        "kg_color": kg["kg_color"],
-        "kg_chat": kg["kg_chat"],
-        "kg_excel": kg["kg_excel"],
+        "kg_chat": kg_chat,
     }
 
-
 def format_text_answer(imei: str, info: dict) -> str:
-    model = info["model"]
-    fullname = info["fullname"]
     status_code = info["status_code"]
-    status_text = info["status_text"]
-    kg_chat = info["kg_chat"]
-
-    if status_code == "REGISTERED":
-        emoji = "✅"
-    elif status_code == "UNREGISTERED":
-        emoji = "❌"
-    else:
-        emoji = "ℹ️"
-
-    text = f"""
+    emoji = "✅" if status_code == "REGISTERED" else ("❌" if status_code == "UNREGISTERED" else "ℹ️")
+    return f"""
 📱 {imei}
 
-<pre><code>Полное название: {fullname}
+<pre><code>Полное название: {info['fullname']}
 IMEI: {imei}
-Статус: {emoji} {status_text}
-{kg_chat}</code></pre>
-"""
-    return text.strip()
+Статус: {emoji} {info['status_text']}
+{info['kg_chat']}</code></pre>
+""".strip()
 
+# ---------- Google Sheets (bitta ustun rejimi) ----------
+def _get_gspread_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+    return gspread.authorize(creds)
 
-# --------- Excel ---------
+def _open_worksheet():
+    gc = _get_gspread_client()
+    sh = gc.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else gc.open(SHEET_NAME)
+    return sh.sheet1
 
-def create_excel_xlsx(imei_list, info_map) -> str:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "IMEI Report"
+def _ensure_header(ws, header_text: str):
+    """
+    A1 bo'sh bo'lsa — header yozamiz.
+    Agar A1 bor bo'lsa va boshqacha bo'lsa, A1 ni yangilaymiz.
+    """
+    a1 = ws.acell("A1").value
+    if (a1 or "").strip() != header_text.strip():
+        ws.update("A1", header_text.strip())
 
-    ws.append(["Полное название", "IMEI", "Статус регистрации", "KG статус"])
+def _get_existing_imeis(ws):
+    """
+    A2 dan pastga hozirgacha yozilgan IMEIlarni o‘qib, to‘plam qaytaradi.
+    """
+    all_vals = ws.col_values(1)  # A ustun
+    # birinchi qator — header, shuning uchun 2-qatorlardan boshlab IMEIlar
+    imeis = [v.strip() for v in all_vals[1:] if str(v).strip()]
+    return set(imeis)
 
-    green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-    red   = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    blue  = PatternFill(start_color="C6D9F1", end_color="C6D9F1", fill_type="solid")
-    purple = PatternFill(start_color="E6B8F7", end_color="E6B8F7", fill_type="solid")  # фиолет
-    gray  = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+def _collect_new_imeis_for_current_model(header_text: str):
+    """
+    checked_imeis.json dagi IMEIlarni O‘SHA BIR MODELDAN kolleksiya qiladi.
+    Talab: 'faqat o'tgan IMEIlar bazaga' — demak, faqat tekshirilganlardan olamiz.
+    Modelni moslashtirish: soddalashtirib — header ichidagi '15'/'16' ga qarab filtrlash.
+    xohlasangiz yanada nozik filtrlash qo‘shamiz.
+    """
+    db = _load_checked()  # { imei: fullname }
+    want_16 = "16" in header_text
+    want_15 = "15" in header_text
 
-    for imei in imei_list:
-        info = info_map[imei]
+    out = []
+    for imei, fullname in db.items():
+        name = (fullname or "").casefold()
+        if want_16 and ("iphone" in name and "16" in name and ("pro max" in name or "promax" in name)):
+            out.append(imei)
+        elif want_15 and ("iphone" in name and "15" in name and ("pro max" in name or "promax" in name)):
+            out.append(imei)
+        # Agar headerga raqam yozilmagan bo‘lsa (erkin nom), HAMMASINI yozish ham mumkin:
+        elif not want_16 and not want_15:
+            out.append(imei)
 
-        fullname = info["fullname"]
-        status_text = info["status_text"]
-        kg_excel = info["kg_excel"]
-        kg_color = info["kg_color"]
-        status_code = info["status_code"]
+    # tartib saqlab, dublikatni olib tashlaymiz
+    seen, uniq = set(), []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
 
-        row = ws.max_row + 1
-        ws.append([fullname, imei, status_text, kg_excel])
+def sync_single_column():
+    """
+    A ustunda bitta model uchun (A1 = header) IMEIlar APPEND qilib boriladi.
+    Hech qachon tozalash yo'q. FAQAT yangilar qo'shiladi (sheet dagi mavjudlar va ro'yxatdagi dublikatlar chiqarib tashlanadi).
+    """
+    header = _get_model_header()
+    if not header:
+        raise RuntimeError("Model sarlavhasi o‘rnatilmagan. Avval /setmodel ni ishlating, masalan: /setmodel iPhone 16 PM")
 
-        # Колонка C — общий статус
-        if status_code == "REGISTERED":
-            ws[f"C{row}"].fill = green
-        elif status_code == "UNREGISTERED":
-            ws[f"C{row}"].fill = red
-        else:
-            ws[f"C{row}"].fill = blue
+    ws = _open_worksheet()
+    _ensure_header(ws, header)
 
-        # Колонка D — KG статус
-        if kg_color == "RED":
-            ws[f"D{row}"].fill = red
-        elif kg_color == "BLUE":
-            ws[f"D{row}"].fill = blue
-        elif kg_color == "GREEN":
-            ws[f"D{row}"].fill = green
-        elif kg_color == "PURPLE":
-            ws[f"D{row}"].fill = purple
-        elif kg_color == "GRAY":
-            ws[f"D{row}"].fill = gray
+    existing = _get_existing_imeis(ws)            # sheetdagi mavjud IMEIlar
+    candidates = _collect_new_imeis_for_current_model(header)  # tekshirilganlardan moslari
 
-    file_path = "imei_result.xlsx"
-    wb.save(file_path)
-    return file_path
+    # faqat yangilar
+    to_add = [i for i in candidates if i not in existing]
+    if not to_add:
+        return 0
 
+    # qaysi qatorga yozishni topamiz: oxirgi qator + 1
+    last_row = len(existing) + 1  # A1 header, existing = A2..A(1+len)
+    # batch yozish
+    rows = [[i] for i in to_add]
+    start = last_row + 1
+    end = last_row + len(to_add)
+    ws.update(f"A{start}:A{end}", rows)
+    return len(to_add)
 
-# --------- Handlers ---------
-
+# ---------- HANDLERLAR ----------
 @bot.message_handler(commands=["start"])
 def start_handler(message):
-    # Userni saqlaymiz
     save_user(message)
-
+    header = _get_model_header() or "— o‘rnatilmagan —"
     bot.reply_to(
         message,
         "Здравствуйте! 👋\n\n"
-        "Отправьте IMEI (один или несколько).\n"
-        "Бот покажет статус регистрации и KG-статус (SIM/срок регистрации).\n\n"
-        "Excel версия → команда /excel"
+        "Отправьте IMEI (один или несколько) — bot tekshiradi va javob beradi.\n"
+        "Admin:\n"
+        "• /setmodel <nom> — A1 sarlavha (masalan: iPhone 16 PM)\n"
+        "• /sync — bitta ustunga (A) faqat yangi IMEIlarni qo‘shish\n"
+        f"Joriy model sarlavhasi: <b>{header}</b>"
     )
 
-
-@bot.message_handler(commands=["excel", "exel"])
-def excel_handler(message):
-    # Userni saqlaymiz
-    save_user(message)
-
-    text = message.text
-    numbers = re.findall(r"\d{10,20}", text)
-    imeis = [n.strip() for n in numbers]
-
-    if not imeis:
-        bot.reply_to(message, "❗ После команды укажите IMEI списком.")
+@bot.message_handler(commands=["setmodel"])
+def setmodel_handler(message):
+    # faqat admin
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔️ У вас нет прав на эту команду.")
         return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "✍️ Namuna: <code>/setmodel iPhone 16 PM</code>")
+        return
+    header = parts[1].strip()
+    _set_model_header(header)
+    try:
+        ws = _open_worksheet()
+        _ensure_header(ws, header)
+    except Exception as e:
+        # headerni lokalga baribir saqlab qo'yamiz; sheets xato bo‘lsa keyin /sync da ishlaydi
+        bot.reply_to(message, f"Model saqlandi: <b>{header}</b>\nSheetsga yozishda xato bo‘ldi: <code>{e}</code>")
+        return
+    bot.reply_to(message, f"✅ Model sarlavhasi o‘rnatildi: <b>{header}</b>")
 
-    # Adminga kim, qaysi IMEI bilan /excel ishlatganini yuboramiz
-    notify_admin_imeis(message, imeis)
-
-    info_map = {}
-    for imei in imeis:
-        data = fetch_imei_data(imei)
-        info_map[imei] = parse_imei(data)
-
-    path = create_excel_xlsx(imeis, info_map)
-    with open(path, "rb") as f:
-        bot.send_document(message.chat.id, f, caption="📄 Excel готов!")
-
+@bot.message_handler(commands=["sync"])
+def sync_handler(message):
+    # faqat admin
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "⛔️ У вас нет прав на эту команду.")
+        return
+    try:
+        added = sync_single_column()
+        bot.reply_to(message, f"✅ Sheets yangilandi. Qo‘shildi: {added} ta yangi IMEI")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Sheets xatosi: <code>{e}</code>")
 
 @bot.message_handler(content_types=["text"])
 def text_handler(message):
-    # Userni saqlaymiz
     save_user(message)
-
-    text = message.text
-
-    if text.startswith("/"):
+    if message.text.startswith("/"):
         return
 
-    imeis = re.findall(r"\d{10,20}", text)
+    imeis = re.findall(r"\d{10,20}", message.text)
     if not imeis:
         bot.reply_to(message, "❗ Отправьте IMEI (можно несколько).")
         return
 
-    # Adminga kim va qaysi IMEIlar bilan foydalanganini yuboramiz
+    # Admin log
     notify_admin_imeis(message, imeis)
 
+    # Har bir IMEI: tekshiramiz, javob beramiz, bazaga yozamiz
     for imei in imeis:
         data = fetch_imei_data(imei)
         info = parse_imei(data)
         bot.send_message(message.chat.id, format_text_answer(imei, info))
-
+        # faqat "otkan imei" bazaga: ya'ni tekshiruvdan o'tgan IMEI'ni saqlaymiz
+        record_checked_imei(imei, info.get("fullname") or info.get("model") or "")
 
 print("Бот запущен...")
 bot.infinity_polling(skip_pending=True)
